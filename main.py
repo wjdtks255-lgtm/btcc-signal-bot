@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BTCC USDT 선물 롱/숏 시그널 봇 (실전 최적화 완성본)
-- 완성된 봉(Closed Candle) 기준 추세 및 필터 검증
-- 텔레그램 알림 전용 (자동 주문 없음)
+USDT 선물 롱/숏 시그널 봇 (안정형 완성본)
+- 바이낸스 공용 API 기반 지표 검증 및 텔레그램 전송
 """
 
 import csv
 import json
 import os
-import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import requests
 import ccxt
@@ -21,55 +19,26 @@ TELEGRAM_TOKEN = os.getenv("BTCC_TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("BTCC_TELEGRAM_CHAT_ID")
 
 STATE_FILE = "btcc_state.json"
-TRADES_FILE = "btcc_trades.csv"
+MAX_SLOTS = 5
 
-MAX_SLOTS = 5                  # 최대 슬롯 5개
-
-# 진입 조건 
-MIN_CHANGE_PCT = 2.5          # 24시간 변동률 기준(%)
-MIN_QUOTE_VOLUME = 500_000    # 24시간 거래대금 최소값(USDT)
+MIN_CHANGE_PCT = 2.5
+MIN_QUOTE_VOLUME = 500_000
 RSI_PERIOD = 14
 ATR_PERIOD = 14
 ADX_PERIOD = 14
-BODY_RATIO_MIN = 0.30         # 캔들 몸통 비율 강화
+BODY_RATIO_MIN = 0.30
 
-# 목표가/손절가 (ATR 배수)
 ATR_SL = 1.5
-ATR_TP_MULTS = (1.0, 2.5, 4.0)   
-MAX_SL_PCT = 5.5              
-
-# 비용/리스크 가정 및 수익형 본전 방어 오프셋
-FEE_ROUNDTRIP = 0.001         
-PROFIT_LOCK_ATR = 0.2         
-MAX_MARGIN_LOSS = 0.5         
-
-# 보유 시간 및 쿨다운 규칙
-ROTATE_HOURS = 18             
-ROTATE_MIN_PROFIT_PCT = 0.5   
-TIME_STOP_HOURS = 24          
-COOLDOWN_HOURS = 6            
-
-DRAW_BAND_R = 0.05
-MAX_CANDIDATES = 50           
+ATR_TP_MULTS = (1.0, 2.5, 4.0)
+MAX_SL_PCT = 5.5
 
 
-# ──────────────────────────── 공통 유틸 ────────────────────────────
 def utcnow():
     return datetime.now(timezone.utc)
-
-def parse_iso(s, default=None):
-    try:
-        dt = datetime.fromisoformat(s)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except Exception:
-        return default
 
 def fmt_price(p):
     if p >= 1000: return f"{p:.2f}"
     if p >= 1: return f"{p:.4f}"
-    if p >= 0.01: return f"{p:.5f}"
     return f"{p:.8f}"
 
 def dir_tag(direction):
@@ -77,7 +46,7 @@ def dir_tag(direction):
 
 def chart_link(symbol):
     clean_sym = symbol.replace("/USDT:USDT", "").replace("/USDT", "")
-    return f"https://www.btcc.com/en-US/trade/futures/perpetual/{clean_sym}USDT"
+    return f"https://www.binance.com/en/futures/{clean_sym}USDT"
 
 def send_telegram_message(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -96,7 +65,6 @@ def send_telegram_message(message):
         return False
 
 
-# ──────────────────────────── 상태 관리 및 CCXT ────────────────────────────
 def load_state():
     if not os.path.exists(STATE_FILE):
         return {"active_slots": {}, "closed_symbols": {}}
@@ -112,18 +80,19 @@ def save_state(state):
         json.dump(state, f, ensure_ascii=False, indent=2)
     os.replace(tmp, STATE_FILE)
 
+
 def get_exchange():
-    # 💡 에러 원인 해결: 대문자 BTCC 사용
-    return ccxt.BTCC({
-        'enableRateLimit': True, 
-        'options': {'defaultType': 'swap'}
+    # 💡 안정적인 바이낸스 퍼페추얼 인프라 활용
+    return ccxt.binance({
+        'enableRateLimit': True,
+        'options': {'defaultType': 'future'}
     })
 
 def fetch_market_data():
     try:
         return get_exchange().fetch_tickers()
     except Exception as e:
-        print(f"Failed to fetch BTCC tickers: {e}")
+        print(f"Failed to fetch tickers: {e}")
         return {}
 
 def fetch_ohlcv_data(symbol, timeframe='1h', limit=100):
@@ -139,7 +108,6 @@ def fetch_ohlcv_data(symbol, timeframe='1h', limit=100):
         return []
 
 
-# ──────────────────────────── 지표 및 필터 ────────────────────────────
 def wilder_rsi(closes, period=RSI_PERIOD):
     if len(closes) < period + 1: return None
     gains, losses = [], []
@@ -218,7 +186,6 @@ def analyze_signal(symbol, direction, now_ts):
     return {"rsi": rsi, "atr": atr, "adx": adx}
 
 
-# ──────────────────────────── 메인 실행 ────────────────────────────
 def run_bot():
     state = load_state()
     now = utcnow()
@@ -230,7 +197,7 @@ def run_bot():
     candidates = []
 
     for symbol, t in tickers.items():
-        if not symbol.endswith("/USDT:USDT") and not symbol.endswith("/USDT"): continue
+        if not symbol.endswith(":USDT"): continue
         try:
             last_price = float(t.get('last', 0))
             change = float(t.get('percentage', 0))
@@ -264,7 +231,7 @@ def run_bot():
             }
 
             msg = (
-                f"🛡️ <b>[BTCC 최적화 시그널]</b> | {dir_tag(direction)}\n"
+                f"🛡️ <b>[선물 최적화 시그널]</b> | {dir_tag(direction)}\n"
                 f"<a href='{chart_link(symbol)}'>{symbol}</a>\n\n"
                 f"진입가: <code>{fmt_price(last_price)}</code> | 변동률: <code>{change:+.2f}%</code>\n"
                 f"TP1: <code>{fmt_price(tp1)}</code> | TP2: <code>{fmt_price(tp2)}</code> | TP3: <code>{fmt_price(tp3)}</code>\n"
