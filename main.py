@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-USDT 선물 롱/숏 시그널 봇 (Git 자동 동기화 및 슬롯 영구 고정 버전)
+BTCC USDT 선물 롱/숏 시그널 봇 (이벤트 발생 시에만 알림 전송 및 슬롯 고정 버전)
 """
 
 import os
@@ -37,11 +37,9 @@ def load_state():
         }
 
 def save_and_commit_state(state):
-    # 로컬 JSON 저장
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
     
-    # 깃허브 액션 환경에서 상태 파일을 레포지토리에 자동 푸시하여 유실 방지
     try:
         subprocess.run(["git", "config", "--global", "user.name", "github-actions[bot]"], check=False)
         subprocess.run(["git", "config", "--global", "user.email", "github-actions[bot]@users.noreply.github.com"], check=False)
@@ -87,6 +85,7 @@ def run_bot():
                 ticker_map[contract] = t
 
         slots_to_remove = []
+        triggered_events = []  # 이벤트(TP/SL 도달 또는 신규 진입) 발생 시에만 메시지 조합용
 
         # 1. 기존 슬롯 현재가 갱신 및 TP/SL 도달 검사
         for contract, slot in list(active_slots.items()):
@@ -137,7 +136,7 @@ def run_bot():
                         f"• 현재가: <code>{current_price:.4f}</code>\n"
                         f"• 최종 수익률: <b>{pnl_pct:+.2f}%</b>"
                     )
-                    send_telegram_message(alert_msg)
+                    triggered_events.append(alert_msg)
 
                     if "TP" in hit_target:
                         stats["wins"] += 1
@@ -205,7 +204,7 @@ def run_bot():
                 active_slots[contract] = slot_data
                 newly_added.append((contract, slot_data))
 
-        # 3. 신규 시그널 알림 전송
+        # 3. 신규 시그널 알림 생성
         for contract, slot in newly_added:
             tag = "🟢" if slot["direction"] == "LONG" else "🔴"
             msg = (
@@ -221,10 +220,10 @@ def run_bot():
                 f"• ADX 14.1 / RSI 40.6\n"
                 f"• 오더블럭(OB) 존: <code>{slot['ob_low']:.4f} ~ {slot['ob_high']:.4f} 리테스트</code>"
             )
-            send_telegram_message(msg)
+            triggered_events.append(msg)
 
-        # 4. 전체 슬롯 현황판 전송
-        if active_slots:
+        # 4. 💡 [핵심] 오직 신규 진입이나 TP/SL 도달 같은 '이벤트'가 발생했을 때만 슬롯 현황판과 알림을 전송함!
+        if triggered_events and active_slots:
             long_cnt = sum(1 for s in active_slots.values() if s["direction"] == "LONG")
             short_cnt = sum(1 for s in active_slots.values() if s["direction"] == "SHORT")
 
@@ -260,7 +259,8 @@ def run_bot():
                 f"평균 R {stats['avg_r']:.2f} | PF {stats['pf']:.2f} | 최근 1전 {stats['last_r']:+.1f}R"
             )
 
-            final_msg = "\n".join(slot_msg_lines) + "\n" + stats_lines
+            # 이벤트 메시지들과 현재 슬롯 현황판을 하나로 묶어서 전송
+            final_msg = "\n\n".join(triggered_events) + "\n\n" + "\n".join(slot_msg_lines) + "\n" + stats_lines
             send_telegram_message(final_msg)
 
         state["active_slots"] = active_slots
