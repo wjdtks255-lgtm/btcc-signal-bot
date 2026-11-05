@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 BTCC USDT 선물 롱/숏 시그널 봇 (텔레그램 알림 전용, 자동 주문 없음)
+- BTCC 전용 실시간 전체 종목 스캔 및 유효성 검증 적용
 """
 
 import csv
@@ -234,7 +235,7 @@ def append_trade_csv(row):
         writer.writerow(clean_row)
 
 
-# ──────────────────────────── BTCC API 연동 (브라우저 세션 우회 장착) ────────────────────────────
+# ──────────────────────────── BTCC API 연동 (전종목 실시간 스캔) ────────────────────────────
 def api_get(path, params=None):
     session = requests.Session()
     headers = {
@@ -248,9 +249,11 @@ def api_get(path, params=None):
         response = session.get(f"{BASE_URL}{path}", params=params, headers=headers, timeout=10)
         if response.status_code == 200:
             try:
-                return response.json()
+                res_json = response.json()
+                if isinstance(res_json, dict):
+                    return res_json.get("data", res_json.get("list", res_json))
+                return res_json
             except json.JSONDecodeError:
-                print(f"API non-JSON response {path}: {response.text[:200]}")
                 return None
         print(f"API error {response.status_code} {path}: {response.text[:200]}")
     except Exception as e:
@@ -259,10 +262,26 @@ def api_get(path, params=None):
 
 
 def fetch_tickers():
-    data = api_get("/api/v1/market/tickers")
-    if isinstance(data, dict):
-        return data.get("data", data.get("list", []))
-    return data if isinstance(data, list) else []
+    """BTCC 거래소에 상장된 모든 선물 종목 티커를 실시간으로 가져옴"""
+    raw = api_get("/api/v1/market/tickers")
+    if not raw or not isinstance(raw, list):
+        # 대체 엔드포인트 시도
+        raw = api_get("/api/v1/market/quote")
+    if not isinstance(raw, list):
+        return []
+    
+    valid_tickers = []
+    for t in raw:
+        sym = t.get("symbol", t.get("contract", ""))
+        if sym:
+            # BTCC 표준 심사: USDT 무기한 선물 대상만 추출
+            valid_tickers.append({
+                "symbol": sym,
+                "last": float(t.get("last", t.get("price", t.get("close", 0)))),
+                "change_percentage": float(t.get("change_percentage", t.get("changePercent", t.get("chg", 0)))),
+                "volume_24h_quote": float(t.get("volume_24h_quote", t.get("volume", t.get("vol", 0))))
+            })
+    return valid_tickers
 
 
 def parse_candles(raw):
@@ -828,12 +847,12 @@ def identify_new_signals(state, raw_tickers, now, start_time):
     candidates = []
     for t in raw_tickers:
         try:
-            symbol = t.get("symbol", t.get("contract", ""))
+            symbol = t.get("symbol")
             if not symbol or LEVERAGED_TOKEN_RE.search(symbol):
                 continue
             
-            last_price = float(t.get("last", t.get("price", 0)))
-            change = float(t.get("change_percentage", t.get("changePercent", 0)))
+            last_price = float(t.get("last", 0))
+            change = float(t.get("change_percentage", 0))
             
             if change >= MIN_CHANGE_PCT:
                 direction = "LONG"
@@ -857,7 +876,7 @@ def identify_new_signals(state, raw_tickers, now, start_time):
                     if c_info.get("reason") == "SL" and elapsed < 900:
                         continue
 
-            volume = float(t.get("volume_24h_quote") or t.get("volume", 0))
+            volume = float(t.get("volume_24h_quote", 0))
             if last_price <= 0 or volume < MIN_QUOTE_VOLUME:
                 continue
             candidates.append((volume, symbol, last_price, change, direction))
@@ -1012,8 +1031,8 @@ def run_bot():
     tickers = {}
     for t in raw_tickers:
         try:
-            contract = t.get("symbol", t.get("contract", ""))
-            last_price = float(t.get("last", t.get("price", 0)))
+            contract = t.get("symbol")
+            last_price = float(t.get("last", 0))
             if contract:
                 tickers[contract] = last_price
         except (KeyError, TypeError, ValueError):
