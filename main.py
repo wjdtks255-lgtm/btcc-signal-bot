@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BTCC USDT 선물 롱/숏 시그널 봇 (TP/SL 도달, 슬롯 해제, 신규 채우기 완벽 통합 버전)
+USDT 선물 롱/숏 시그널 봇 (안정적인 퍼블릭 API 연동 및 TP/SL 도달/슬롯 관리 완벽 버전)
 """
 
 import os
@@ -63,31 +63,27 @@ def run_bot():
     stats = state.get("stats", {"wins": 0, "draws": 0, "losses": 0, "pf": 0.00, "avg_r": 0.0, "last_r": 0.0})
 
     try:
-        url = "https://a.btcc.com/api/v1/market/tickers"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers, timeout=10)
+        # 💡 깃허브 클라우드 환경에서 차단이나 DNS 에러 없이 안정적으로 작동하는 퍼블릭 시세 API 연동
+        url = "https://api.gateio.ws/api/v4/futures/usdt/tickers"
+        res = requests.get(url, timeout=10)
         
         if res.status_code != 200:
             return
         
-        data = res.json()
-        tickers = data.get("data", data) if isinstance(data, dict) else data
-        if not isinstance(tickers, list):
-            tickers = []
-
+        tickers = res.json()
         ticker_map = {}
         for t in tickers:
-            sym = t.get("symbol", t.get("contract", ""))
-            if sym:
-                ticker_map[sym] = t
+            contract = t.get("contract", "")
+            if contract:
+                ticker_map[contract] = t
 
         slots_to_remove = []
 
-        # 1. 기존 슬롯들의 현재가 갱신 및 TP/SL 도달 여부 검사
+        # 1. 기존 슬롯들의 현재가 실시간 갱신 및 TP/SL 도달 여부 검사
         for contract, slot in list(active_slots.items()):
             if contract in ticker_map:
                 t_info = ticker_map[contract]
-                current_price = float(t_info.get("last", t_info.get("price", slot["entry_price"])))
+                current_price = float(t_info.get("last", slot["entry_price"]))
                 entry_price = slot["entry_price"]
                 direction = slot["direction"]
 
@@ -153,20 +149,20 @@ def run_bot():
         # 2. 도달로 인해 비워진 슬롯만큼 새로운 종목 탐색하여 채우기
         newly_added = []
         if len(active_slots) < MAX_SLOTS:
-            for sym, t in ticker_map.items():
+            for contract, t in ticker_map.items():
                 if len(active_slots) >= MAX_SLOTS:
                     break
 
-                contract = sym
-                if not contract.endswith("USDT") and not contract.endswith("_USDT"):
+                if not contract.endswith("_USDT"):
                     continue
                 if contract in active_slots:
                     continue
                 
-                last_price = float(t.get("last", t.get("price", 0)))
-                change = float(t.get("change_percentage", t.get("changePercent", 0)))
+                last_price = float(t.get("last", 0))
+                change = float(t.get("change_percentage", 0))
+                volume = float(t.get("volume_24h_quote", 0))
 
-                if last_price <= 0:
+                if volume < MIN_QUOTE_VOLUME or last_price <= 0:
                     continue
 
                 direction = None
@@ -177,7 +173,7 @@ def run_bot():
                 else:
                     continue
 
-                clean_sym = contract.replace("_", "").replace("USDT", "")
+                clean_sym = contract.replace("_USDT", "")
                 asset_type = "주식" if clean_sym in ["TSLA", "INTC", "NVDA", "AAPL"] else "코인"
                 atr = last_price * 0.015
                 tp1 = last_price + (atr * 1.0 if direction == "LONG" else -atr * 1.0)
@@ -208,7 +204,7 @@ def run_bot():
         for contract, slot in newly_added:
             tag = "🟢" if slot["direction"] == "LONG" else "🔴"
             msg = (
-                f"🚨 <b>신규 시그널 (BTCC)</b> | {tag} <b>{contract}</b>\n\n"
+                f"🚨 <b>신규 시그널</b> | {tag} <b>{contract}</b>\n\n"
                 f"진입가 <code>{slot['entry_price']:.4f}</code> | 레버리지 {slot['leverage']}배\n\n"
                 f"🎯 <b>목표가 및 본전방어</b>\n"
                 f"• TP1 <code>{slot['tp1']:.4f}</code> (+{abs(slot['change']):.2f}%) ➔ 도달 시스탑 +0.2 ATR 락\n"
@@ -228,7 +224,7 @@ def run_bot():
             short_cnt = sum(1 for s in active_slots.values() if s["direction"] == "SHORT")
 
             slot_msg_lines = [
-                f"📊 <b>BTCC 슬롯 현황 ({len(active_slots)} / {MAX_SLOTS})</b> | 🟢 롱 {long_cnt} / 🔴 숏 {short_cnt}\n"
+                f"📊 <b>슬롯 현황 ({len(active_slots)} / {MAX_SLOTS})</b> | 🟢 롱 {long_cnt} / 🔴 숏 {short_cnt}\n"
             ]
 
             num_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
