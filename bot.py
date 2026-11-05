@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 BTCC USDT 선물 롱/숏 시그널 봇 (텔레그램 알림 전용, 자동 주문 없음)
-- 제공해주신 최신 봇의 알림 양식, 타이밍, 링크 및 로직을 BTCC API 환경으로 완벽 이식
 """
 
 import csv
 import json
 import os
 import re
+import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -21,12 +21,12 @@ TELEGRAM_CHAT_ID = os.getenv("BTCC_TELEGRAM_CHAT_ID")
 STATE_FILE = "btcc_state.json"
 TRADES_FILE = "trades.csv"
 
-# 💡 BTCC 퍼블릭 선물 API 베이스 URL
+# BTCC 퍼블릭 선물 API 베이스 URL
 BASE_URL = "https://a.btcc.com/api/v1/market"
 
 MAX_SLOTS = 5                  # 최대 슬롯 5개
 
-# 진입 조건 (완화 버전 기준 반영)
+# 진입 조건 (완화 버전)
 MIN_CHANGE_PCT = 2.0          # 24시간 변동률 기준(%)
 MIN_QUOTE_VOLUME = 200_000    # 24시간 거래대금 최소값(USDT)
 RSI_PERIOD = 14
@@ -51,7 +51,7 @@ MAX_MARGIN_LOSS = 0.5
 ROTATE_HOURS = 18             
 ROTATE_MIN_PROFIT_PCT = 0.5   
 TIME_STOP_HOURS = 24          
-COOLDOWN_HOURS = 2            # 쿨다운 2시간
+COOLDOWN_HOURS = 2            
 
 # 결과 분류: 무승부 밴드
 DRAW_BAND_R = 0.05
@@ -69,15 +69,6 @@ CSV_FIELDS = [
     "holding_hours", "gross_r", "net_r", "mfe_r", "mae_r",
     "leverage_pct", "outcome"
 ]
-
-REASON_LABEL = {
-    "SL": "손절",
-    "PROFIT_LOCK": "수익 방어",
-    "TP1_PROTECT": "TP1 방어",
-    "TP3": "TP3",
-    "ROTATE": "회전",
-    "TIME_STOP": "타임스탑",
-}
 
 NUM_EMOJI = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
 
@@ -118,7 +109,6 @@ def dir_tag(direction):
 
 
 def chart_link(symbol):
-    # BTCC 전용 차트 링크 형식 대응
     clean_sym = symbol.replace("_", "").replace("USDT", "")
     return f"https://www.btcc.com/ko-KR/trade/perpetual/{clean_sym}USDT"
 
@@ -161,7 +151,7 @@ def send_telegram_message(message):
         return False
 
 
-# ──────────────────────────── 상태 저장/불러오기 ────────────────────────────
+# ──────────────────────────── 상태 저장 및 자동 커밋 ────────────────────────────
 def default_state():
     return {
         "active_slots": {},
@@ -218,11 +208,21 @@ def load_state():
     return state
 
 
-def save_state(state):
+def save_and_commit_state(state):
     tmp = STATE_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
     os.replace(tmp, STATE_FILE)
+    
+    # 깃허브 액션 환경에서 상태 파일 자동 동기화
+    try:
+        subprocess.run(["git", "config", "--global", "user.name", "github-actions[bot]"], check=False)
+        subprocess.run(["git", "config", "--global", "user.email", "github-actions[bot]@users.noreply.github.com"], check=False)
+        subprocess.run(["git", "add", STATE_FILE, TRADES_FILE], check=False)
+        subprocess.run(["git", "commit", "-m", "Auto-update bot state & trades [skip ci]"], check=False)
+        subprocess.run(["git", "push"], check=False)
+    except Exception as e:
+        print(f"Git commit/push error: {e}")
 
 
 def append_trade_csv(row):
@@ -383,12 +383,12 @@ def check_order_block_retest(candles, direction, current_price):
     for i in range(len(candles) - 2, max(0, len(candles) - 6), -1):
         c = candles[i]
         if direction == "LONG":
-            if c["o"] > c["c"]:  # 음봉 (Demand OB)
+            if c["o"] > c["c"]:
                 zone_low, zone_high = c["l"] * 0.98, c["o"] * 1.02
                 if zone_low <= current_price <= zone_high * 1.05:
                     return c["l"], c["o"]
         else:
-            if c["c"] > c["o"]:  # 양봉 (Supply OB)
+            if c["c"] > c["o"]:
                 zone_low, zone_high = c["o"] * 0.98, c["h"] * 1.02
                 if zone_low * 0.95 <= current_price <= zone_high:
                     return c["o"], c["h"]
@@ -438,7 +438,7 @@ def analyze_signal(symbol, direction, now_ts, current_price):
     }
 
 
-# ──────────────────────────── 분류/레버리지/테마 ────────────────────────────
+# ──────────────────────────── 분류 및 레버리지 ────────────────────────────
 STOCK_BASES = {"SKHYNIX", "TSLA", "AAPL", "NVDA", "MSFT", "AMZN", "META", "NFLX",
                "GOOGL", "BABA", "AMD", "INTC", "PLTR", "COIN", "MSTR",
                "SOXL", "SOXS", "TQQQ", "SQQQ"}
@@ -907,7 +907,6 @@ def identify_new_signals(state, raw_tickers, now, start_time):
             def pct_of(price):
                 return pct_move(direction, last_price, price)
 
-            # 신규 시그널 개별 텔레그램 알림 전송 (종목명 링크 포함)
             msg = (
                 f"🛡️ <b>신규 시그널</b> | {dir_tag(direction)}\n"
                 f"<a href='{chart_link(symbol)}'>[{category}] {symbol}</a>\n\n"
@@ -995,7 +994,7 @@ def run_bot():
         n = state["fail_count"]
         if n == FAIL_ALERT_THRESHOLD or (n > FAIL_ALERT_THRESHOLD and (n - FAIL_ALERT_THRESHOLD) % 12 == 0):
             send_telegram_message(f"⚠️ <b>봇 오류 경고</b>\nBTCC 시세 조회가 {n}회 연속 실패했습니다.")
-        save_state(state)
+        save_and_commit_state(state)
         return
     state["fail_count"] = 0
 
@@ -1020,12 +1019,11 @@ def run_bot():
     if len(state["active_slots"]) < MAX_SLOTS:
         changed_new = identify_new_signals(state, raw_tickers, now, start_time)
 
-    # 💡 이벤트(포지션 상태 변화 또는 신규 시그널 발생)가 있을 때만 슬롯 현황 전송 타이밍 유지
     if changed_positions or changed_new:
         send_telegram_message(build_slot_status_message(state, tickers))
 
     maybe_send_daily_report(state, tickers, now)
-    save_state(state)
+    save_and_commit_state(state)
 
 
 if __name__ == "__main__":
