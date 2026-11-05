@@ -21,19 +21,19 @@ TELEGRAM_CHAT_ID = os.getenv("BTCC_TELEGRAM_CHAT_ID")
 STATE_FILE = "btcc_state.json"
 TRADES_FILE = "trades.csv"
 
-# BTCC 퍼블릭 선물 API 베이스 URL
-BASE_URL = "https://a.btcc.com/api/v1/market"
+# 💡 BTCC 공식 API 베이스 URL
+BASE_URL = "https://trade.btcc.com"
 
 MAX_SLOTS = 5                  # 최대 슬롯 5개
 
-# 진입 조건 (완화 버전)
-MIN_CHANGE_PCT = 2.0          # 24시간 변동률 기준(%)
-MIN_QUOTE_VOLUME = 200_000    # 24시간 거래대금 최소값(USDT)
+# 진입 조건 
+MIN_CHANGE_PCT = 2.0          
+MIN_QUOTE_VOLUME = 200_000    
 RSI_PERIOD = 14
 ATR_PERIOD = 14
 ADX_PERIOD = 14
-BODY_RATIO_MIN = 0.20         # 캔들 몸통 비율 조건
-LEVERAGED_TOKEN_RE = re.compile(r"\d+[LS]_USDT$")  # 레버리지 토큰 제외
+BODY_RATIO_MIN = 0.20         
+LEVERAGED_TOKEN_RE = re.compile(r"\d+[LS]_USDT$")  
 
 # 목표가/손절가 (ATR 배수)
 ATR_SL = 1.5
@@ -214,7 +214,6 @@ def save_and_commit_state(state):
         json.dump(state, f, ensure_ascii=False, indent=2)
     os.replace(tmp, STATE_FILE)
     
-    # 깃허브 액션 환경에서 상태 파일 자동 동기화
     try:
         subprocess.run(["git", "config", "--global", "user.name", "github-actions[bot]"], check=False)
         subprocess.run(["git", "config", "--global", "user.email", "github-actions[bot]@users.noreply.github.com"], check=False)
@@ -248,7 +247,7 @@ def api_get(path, params=None):
 
 
 def fetch_tickers():
-    data = api_get("/tickers")
+    data = api_get("/api/v1/market/tickers")
     if isinstance(data, dict):
         return data.get("data", data.get("list", []))
     return data if isinstance(data, list) else []
@@ -275,7 +274,7 @@ def parse_candles(raw):
 def fetch_completed_candles(symbol, interval, from_ts, now_ts):
     if from_ts >= now_ts:
         return []
-    raw = api_get("/candlesticks", {
+    raw = api_get("/api/v1/market/candlesticks", {
         "symbol": symbol, "interval": interval,
         "from": int(from_ts), "to": int(now_ts),
     })
@@ -397,7 +396,7 @@ def check_order_block_retest(candles, direction, current_price):
 
 
 def analyze_signal(symbol, direction, now_ts, current_price):
-    raw = api_get("/candlesticks", {"symbol": symbol, "interval": "1h", "limit": 60})
+    raw = api_get("/api/v1/market/candlesticks", {"symbol": symbol, "interval": "1h", "limit": 60})
     if isinstance(raw, dict):
         raw = raw.get("data", raw.get("list", []))
     candles = [c for c in parse_candles(raw) if c["t"] + 3600 <= now_ts]
