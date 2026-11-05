@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BTCC USDT 선물 롱/숏 시그널 봇 (실시간 가격 기준 TP/SL 도달 감지 및 슬롯 고정 버전)
+BTCC USDT 선물 롱/숏 시그널 봇 (TP/SL 도달, 슬롯 해제, 신규 채우기 완벽 통합 버전)
 """
 
 import os
@@ -81,10 +81,9 @@ def run_bot():
             if sym:
                 ticker_map[sym] = t
 
-        newly_added = []
         slots_to_remove = []
 
-        # 1. 기존 슬롯들의 현재가 실시간 비교 및 TP/SL 도달 감지
+        # 1. 기존 슬롯들의 현재가 갱신 및 TP/SL 도달 여부 검사
         for contract, slot in list(active_slots.items()):
             if contract in ticker_map:
                 t_info = ticker_map[contract]
@@ -92,6 +91,7 @@ def run_bot():
                 entry_price = slot["entry_price"]
                 direction = slot["direction"]
 
+                # 실시간 PnL 계산
                 if direction == "LONG":
                     pnl_pct = ((current_price - entry_price) / entry_price) * 100
                 else:
@@ -125,6 +125,7 @@ def run_bot():
                     elif current_price >= sl:
                         hit_target = "SL (손절 도달 🛑)"
 
+                # 도달한 경우 알림 발송 및 통계 반영, 슬롯 제거 대상 등록
                 if hit_target:
                     tag = "🟢" if direction == "LONG" else "🔴"
                     alert_msg = (
@@ -145,10 +146,12 @@ def run_bot():
 
                     slots_to_remove.append(contract)
 
+        # 도달한 종목들을 슬롯에서 비워냄
         for contract in slots_to_remove:
             del active_slots[contract]
 
-        # 2. 빈 슬롯이 있을 때만 새로운 종목 탐색
+        # 2. 도달로 인해 비워진 슬롯만큼 새로운 종목 탐색하여 채우기
+        newly_added = []
         if len(active_slots) < MAX_SLOTS:
             for sym, t in ticker_map.items():
                 if len(active_slots) >= MAX_SLOTS:
@@ -201,7 +204,7 @@ def run_bot():
                 active_slots[contract] = slot_data
                 newly_added.append((contract, slot_data))
 
-        # 3. 신규 시그널 알림 전송
+        # 3. 새로 채워진 종목에 대한 상세 신규 시그널 알림 전송
         for contract, slot in newly_added:
             tag = "🟢" if slot["direction"] == "LONG" else "🔴"
             msg = (
@@ -219,7 +222,7 @@ def run_bot():
             )
             send_telegram_message(msg)
 
-        # 4. 슬롯 현황판 출력
+        # 4. 갱신된 전체 슬롯 현황 및 통계 출력
         if active_slots:
             long_cnt = sum(1 for s in active_slots.values() if s["direction"] == "LONG")
             short_cnt = sum(1 for s in active_slots.values() if s["direction"] == "SHORT")
