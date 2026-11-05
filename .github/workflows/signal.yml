@@ -1,11 +1,12 @@
 name: BTCC Futures Signal Bot
 
 on:
-  workflow_dispatch:
-  repository_dispatch:
-    types: [run-bot]
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/5 * * * *'  # 5분마다 실행
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   run-bot:
@@ -24,9 +25,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: Execute Signal Script
+      - name: Run bot script
         env:
           BTCC_TELEGRAM_TOKEN: ${{ secrets.BTCC_TELEGRAM_TOKEN }}
           BTCC_TELEGRAM_CHAT_ID: ${{ secrets.BTCC_TELEGRAM_CHAT_ID }}
         run: |
-          python main.py
+          python bot.py
