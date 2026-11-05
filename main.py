@@ -1,55 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-USDT 선물 롱/숏 시그널 봇 (안정형 완성본)
-- 바이낸스 공용 API 기반 지표 검증 및 텔레그램 전송
+USDT 선물 롱/숏 시그널 봇 (HTTP 공개 API 기반 - IP 제한 우회 버전)
+- 텔레그램 알림 전용
 """
 
-import csv
-import json
 import os
-import time
+import requests
 from datetime import datetime, timezone
 
-import requests
-import ccxt
-
-# ──────────────────────────── 설정 ────────────────────────────
 TELEGRAM_TOKEN = os.getenv("BTCC_TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("BTCC_TELEGRAM_CHAT_ID")
 
-STATE_FILE = "btcc_state.json"
-MAX_SLOTS = 5
-
-MIN_CHANGE_PCT = 2.5
-MIN_QUOTE_VOLUME = 500_000
-RSI_PERIOD = 14
-ATR_PERIOD = 14
-ADX_PERIOD = 14
-BODY_RATIO_MIN = 0.30
-
-ATR_SL = 1.5
-ATR_TP_MULTS = (1.0, 2.5, 4.0)
-MAX_SL_PCT = 5.5
-
+MIN_CHANGE_PCT = 2.0  # 변동률 조건 (테스트를 위해 잠시 2%로 완화)
 
 def utcnow():
     return datetime.now(timezone.utc)
 
-def fmt_price(p):
-    if p >= 1000: return f"{p:.2f}"
-    if p >= 1: return f"{p:.4f}"
-    return f"{p:.8f}"
-
-def dir_tag(direction):
-    return "🟢 롱" if direction == "LONG" else "🔴 숏"
-
-def chart_link(symbol):
-    clean_sym = symbol.replace("/USDT:USDT", "").replace("/USDT", "")
-    return f"https://www.binance.com/en/futures/{clean_sym}USDT"
-
 def send_telegram_message(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram credentials missing.")
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -61,188 +31,64 @@ def send_telegram_message(message):
     try:
         response = requests.post(url, json=payload, timeout=10)
         return response.status_code == 200
-    except Exception:
+    except Exception as e:
+        print(f"Telegram error: {e}")
         return False
 
-
-def load_state():
-    if not os.path.exists(STATE_FILE):
-        return {"active_slots": {}, "closed_symbols": {}}
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {"active_slots": {}, "closed_symbols": {}}
-
-def save_state(state):
-    tmp = STATE_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, STATE_FILE)
-
-
-def get_exchange():
-    # 💡 안정적인 바이낸스 퍼페추얼 인프라 활용
-    return ccxt.binance({
-        'enableRateLimit': True,
-        'options': {'defaultType': 'future'}
-    })
-
-def fetch_market_data():
-    try:
-        return get_exchange().fetch_tickers()
-    except Exception as e:
-        print(f"Failed to fetch tickers: {e}")
-        return {}
-
-def fetch_ohlcv_data(symbol, timeframe='1h', limit=100):
-    try:
-        raw = get_exchange().fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        out = []
-        for c in raw:
-            out.append({"t": int(c[0] / 1000), "o": float(c[1]), "h": float(c[2]), "l": float(c[3]), "c": float(c[4]), "v": float(c[5])})
-        out.sort(key=lambda x: x["t"])
-        return out
-    except Exception as e:
-        print(f"Failed to fetch OHLCV for {symbol}: {e}")
-        return []
-
-
-def wilder_rsi(closes, period=RSI_PERIOD):
-    if len(closes) < period + 1: return None
-    gains, losses = [], []
-    for i in range(1, len(closes)):
-        diff = closes[i] - closes[i - 1]
-        gains.append(max(diff, 0.0)); losses.append(max(-diff, 0.0))
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-    for i in range(period, len(gains)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-    if avg_loss == 0: return 100.0
-    return 100 - (100 / (1 + (avg_gain / avg_loss)))
-
-def calc_atr(candles, period=ATR_PERIOD):
-    if len(candles) < period + 1: return None
-    trs = [max(c["h"] - c["l"], abs(c["h"] - candles[i]["c"]), abs(c["l"] - candles[i]["c"])) for i, c in enumerate(candles[1:], 1)]
-    return sum(trs[-period:]) / period
-
-def calc_ema(closes, period=20):
-    if len(closes) < period: return sum(closes) / len(closes) if closes else None
-    multiplier = 2 / (period + 1)
-    ema = sum(closes[:period]) / period
-    for price in closes[period:]:
-        ema = (price - ema) * multiplier + ema
-    return ema
-
-def calc_adx(candles, period=ADX_PERIOD):
-    if len(candles) < period * 2: return 25.0
-    tr_list, plus_dm, minus_dm = [], [], []
-    for i in range(1, len(candles)):
-        h, l, pc = candles[i]["h"], candles[i]["l"], candles[i - 1]["c"]
-        tr_list.append(max(h - l, abs(h - pc), abs(l - pc)))
-        up, down = h - candles[i - 1]["h"], candles[i - 1]["l"] - l
-        plus_dm.append(up if (up > down and up > 0) else 0.0)
-        minus_dm.append(down if (down > up and down > 0) else 0.0)
-    
-    atr_v = sum(tr_list[:period]) / period
-    p_di = sum(plus_dm[:period]) / period
-    m_di = sum(minus_dm[:period]) / period
-    dxs = []
-    for i in range(period, len(tr_list)):
-        atr_v = (atr_v * (period - 1) + tr_list[i]) / period
-        p_di = (p_di * (period - 1) + plus_dm[i]) / period
-        m_di = (m_di * (period - 1) + minus_dm[i]) / period
-        di_sum = p_di + m_di
-        dxs.append((abs(p_di - m_di) / di_sum * 100) if di_sum > 0 else 0)
-    return sum(dxs[-period:]) / len(dxs[-period:]) if dxs else 25.0
-
-def analyze_signal(symbol, direction, now_ts):
-    candles = fetch_ohlcv_data(symbol, timeframe='1h', limit=80)
-    candles = [c for c in candles if c["t"] + 3600 <= now_ts]
-    if len(candles) < 50: return None
-
-    closed_candle = candles[-2]
-    closes = [c["c"] for c in candles[:-1]]
-    
-    ema20, ema50 = calc_ema(closes, 20), calc_ema(closes, 50)
-    adx, atr = calc_adx(candles[:-1], ADX_PERIOD), calc_atr(candles[:-1], ATR_PERIOD)
-    rsi = wilder_rsi(closes, RSI_PERIOD)
-    
-    if not ema20 or not ema50 or not atr or atr <= 0 or rsi is None: return None
-
-    total_range = closed_candle["h"] - closed_candle["l"]
-    if total_range <= 0: return None
-    body_ratio = abs(closed_candle["c"] - closed_candle["o"]) / total_range
-    if body_ratio < BODY_RATIO_MIN: return None
-
-    if direction == "LONG":
-        if not (ema20 > ema50 and closed_candle["c"] > ema50) or adx < 15 or rsi < 45 or closed_candle["c"] <= closed_candle["o"]:
-            return None
-    else:
-        if not (ema20 < ema50 and closed_candle["c"] < ema50) or adx < 15 or rsi > 55 or closed_candle["c"] >= closed_candle["o"]:
-            return None
-
-    return {"rsi": rsi, "atr": atr, "adx": adx}
-
-
 def run_bot():
-    state = load_state()
-    now = utcnow()
-    now_ts = int(now.timestamp())
-    tickers = fetch_market_data()
-    if not tickers: return
+    print("Fetching public market data...")
+    try:
+        # 바이낸스 퍼블릭 24hr 틱 데이터를 HTTP로 직접 조회 (IP 제한 없음)
+        url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+        res = requests.get(url, timeout=10)
+        if res.status_code != 200:
+            print(f"API failed with status {res.status_code}")
+            return
+        
+        tickers = res.json()
+        signals_sent = 0
 
-    active = state["active_slots"]
-    candidates = []
+        for t in tickers:
+            symbol = t.get("symbol", "")
+            if not symbol.endswith("USDT"):
+                continue
+            
+            last_price = float(t.get("lastPrice", 0))
+            change = float(t.get("priceChangePercent", 0))
+            volume = float(t.get("quoteVolume", 0))
 
-    for symbol, t in tickers.items():
-        if not symbol.endswith(":USDT"): continue
-        try:
-            last_price = float(t.get('last', 0))
-            change = float(t.get('percentage', 0))
-            volume = float(t.get('quoteVolume', 0))
+            if volume < 1_000_000:  # 최소 거래대금 100만 USDT 이상
+                continue
 
-            direction = "LONG" if change >= MIN_CHANGE_PCT else ("SHORT" if change <= -MIN_CHANGE_PCT else None)
-            if not direction or symbol in active or last_price <= 0 or volume < MIN_QUOTE_VOLUME: continue
-            candidates.append((volume, symbol, last_price, change, direction))
-        except Exception:
-            continue
+            direction = None
+            if change >= MIN_CHANGE_PCT:
+                direction = "LONG"
+            elif change <= -MIN_CHANGE_PCT:
+                direction = "SHORT"
+            else:
+                continue
 
-    candidates.sort(reverse=True)
-    for volume, symbol, last_price, change, direction in candidates[:MAX_CANDIDATES]:
-        if len(active) >= MAX_SLOTS: break
-        try:
-            analysis = analyze_signal(symbol, direction, now_ts)
-            if not analysis: continue
-
-            atr = analysis["atr"]
-            risk = atr * ATR_SL
-            sign = 1 if direction == "LONG" else -1
-            tp1, tp2, tp3 = (last_price + sign * atr * m for m in ATR_TP_MULTS)
-            sl = last_price - sign * risk
-
-            if (risk / last_price) * 100 > MAX_SL_PCT: continue
-
-            active[symbol] = {
-                "direction": direction, "entry_price": last_price, "entry_time": now.isoformat(),
-                "leverage": 7, "risk": risk, "atr": atr, "tp1": tp1, "tp2": tp2, "tp3": tp3,
-                "stop_loss": sl, "tp1_reached": False, "tp2_reached": False
-            }
+            tag = "🟢 롱" if direction == "LONG" else "🔴 숏"
+            chart_url = f"https://www.binance.com/en/futures/{symbol}"
 
             msg = (
-                f"🛡️ <b>[선물 최적화 시그널]</b> | {dir_tag(direction)}\n"
-                f"<a href='{chart_link(symbol)}'>{symbol}</a>\n\n"
-                f"진입가: <code>{fmt_price(last_price)}</code> | 변동률: <code>{change:+.2f}%</code>\n"
-                f"TP1: <code>{fmt_price(tp1)}</code> | TP2: <code>{fmt_price(tp2)}</code> | TP3: <code>{fmt_price(tp3)}</code>\n"
-                f"손절(SL): <code>{fmt_price(sl)}</code>"
+                f"🛡️ <b>[실시간 선물 급등락 시그널]</b> | {tag}\n"
+                f"<a href='{chart_url}'>{symbol}</a>\n\n"
+                f"현재가: <code>{last_price}</code>\n"
+                f"24시간 변동률: <code>{change:+.2f}%</code>\n"
+                f"24시간 거래대금: <code>{int(volume):,} USDT</code>"
             )
-            send_telegram_message(msg)
-        except Exception as e:
-            print(f"Error evaluating {symbol}: {e}")
-            continue
 
-    save_state(state)
+            # 테스트 및 과도한 알림 방지를 위해 상위 3개만 발송
+            if send_telegram_message(msg):
+                signals_sent += 1
+                if signals_sent >= 3:
+                    break
+
+        print(f"Bot executed successfully. Sent {signals_sent} signals.")
+
+    except Exception as e:
+        print(f"Error in run_bot: {e}")
 
 if __name__ == "__main__":
     run_bot()
