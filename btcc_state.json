@@ -1,0 +1,11 @@
+{
+  "active_slots": {},
+  "stats": {
+    "wins": 0,
+    "draws": 0,
+    "losses": 0,
+    "pf": 0.0,
+    "avg_r": 0.0,
+    "last_r": 0.0
+  }
+}
