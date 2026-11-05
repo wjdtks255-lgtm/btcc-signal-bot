@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BTCC USDT 선물 롱/숏 시그널 봇 (실전 최적화 버전)
-- 완성된 봉(Closed Candle) 기준 추세 및 오더블럭 리테스트 검증
+BTCC USDT 선물 롱/숏 시그널 봇 (실전 최적화 완성본)
+- 완성된 봉(Closed Candle) 기준 추세 및 필터 검증
 - 텔레그램 알림 전용 (자동 주문 없음)
 """
 
@@ -113,7 +113,11 @@ def save_state(state):
     os.replace(tmp, STATE_FILE)
 
 def get_exchange():
-    return ccxt.btcc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+    # 💡 에러 원인 해결: 대문자 BTCC 사용
+    return ccxt.BTCC({
+        'enableRateLimit': True, 
+        'options': {'defaultType': 'swap'}
+    })
 
 def fetch_market_data():
     try:
