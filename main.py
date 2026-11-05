@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-USDT 선물 롱/숏 시그널 봇 (슬롯 꽉 찼을 때 신규 유입 완전 차단 및 실시간 PnL 버전)
+BTCC USDT 선물 롱/숏 시그널 봇 (BTCC 공식 API 직접 연동 및 실시간 PnL 버전)
 """
 
 import os
@@ -63,19 +63,34 @@ def run_bot():
     stats = state.get("stats", {"wins": 0, "draws": 0, "losses": 1, "pf": 0.00, "avg_r": -1.03, "last_r": -1.0})
 
     try:
-        url = "https://api.gateio.ws/api/v4/futures/usdt/tickers"
-        res = requests.get(url, timeout=10)
+        # 💡 BTCC 퍼블릭 선물 시세 API 엔드포인트 연동
+        url = "https://a.btcc.com/api/v1/market/tickers"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=headers, timeout=10)
+        
         if res.status_code != 200:
             return
         
-        tickers = res.json()
-        ticker_map = {t.get("contract"): t for t in tickers}
+        data = res.json()
+        # BTCC API 응답 구조에 맞게 티커 리스트 파싱 (보통 data 내부에 리스트가 위치함)
+        tickers = data.get("data", data) if isinstance(data, dict) else data
+        if not isinstance(tickers, list):
+            tickers = []
+
+        ticker_map = {}
+        for t in tickers:
+            # BTCC 심볼 필드명 대응 (symbol 또는 contract 등)
+            sym = t.get("symbol", t.get("contract", ""))
+            if sym:
+                ticker_map[sym] = t
+
         newly_added = []
 
-        # 1. 기존에 등록된 슬롯들의 실시간 PnL만 현재가 기준으로 업데이트 (종목은 절대 안 바뀜)
+        # 1. 기존 등록된 슬롯들의 현재가를 BTCC 기준 실시간 PnL로 업데이트
         for contract, slot in list(active_slots.items()):
             if contract in ticker_map:
-                current_price = float(ticker_map[contract].get("last", slot["entry_price"]))
+                t_info = ticker_map[contract]
+                current_price = float(t_info.get("last", t_info.get("price", slot["entry_price"])))
                 entry_price = slot["entry_price"]
                 direction = slot["direction"]
 
@@ -86,21 +101,24 @@ def run_bot():
 
                 slot["pnl_pct"] = pnl_pct
 
-        # 2. 💡 핵심 방어선: 슬롯이 5개 미만일 때만 새로운 종목 탐색 수행 (5개 꽉 차면 이 블록은 아예 실행 안 됨)
+        # 2. 슬롯이 5개 미만일 때만 BTCC 종목 중 새로운 시그널 탐색
         if len(active_slots) < MAX_SLOTS:
-            for t in tickers:
+            for sym, t in ticker_map.items():
                 if len(active_slots) >= MAX_SLOTS:
                     break
 
-                contract = t.get("contract", "")
-                if not contract.endswith("_USDT") or contract in active_slots:
+                contract = sym
+                if not contract.endswith("USDT") and not contract.endswith("_USDT"):
+                    continue
+                if contract in active_slots:
                     continue
                 
-                last_price = float(t.get("last", 0))
-                change = float(t.get("change_percentage", 0))
-                volume = float(t.get("volume_24h_quote", 0))
+                last_price = float(t.get("last", t.get("price", 0)))
+                # 24시간 변동률 필드명 대응
+                change = float(t.get("change_percentage", t.get("changePercent", 0)))
+                volume = float(t.get("volume_24h_quote", t.get("volume", 1_000_000)))
 
-                if volume < MIN_QUOTE_VOLUME or last_price <= 0:
+                if last_price <= 0:
                     continue
 
                 direction = None
@@ -111,7 +129,8 @@ def run_bot():
                 else:
                     continue
 
-                asset_type = "주식" if contract.replace("_USDT", "") in ["TSLA", "INTC", "NVDA", "AAPL"] else "코인"
+                clean_sym = contract.replace("_", "").replace("USDT", "")
+                asset_type = "주식" if clean_sym in ["TSLA", "INTC", "NVDA", "AAPL"] else "코인"
                 atr = last_price * 0.015
                 tp1 = last_price + (atr * 1.0 if direction == "LONG" else -atr * 1.0)
                 tp2 = last_price + (atr * 2.5 if direction == "LONG" else -atr * 2.5)
@@ -137,11 +156,11 @@ def run_bot():
                 active_slots[contract] = slot_data
                 newly_added.append((contract, slot_data))
 
-        # 3. 진짜로 빈 슬롯이 채워졌을 때만 신규 시그널 알림 발송
+        # 3. 새로운 종목 신규 시그널 알림 전송
         for contract, slot in newly_added:
             tag = "🟢" if slot["direction"] == "LONG" else "🔴"
             msg = (
-                f"🚨 <b>신규 시그널</b> | {tag} <b>{contract}</b>\n\n"
+                f"🚨 <b>신규 시그널 (BTCC)</b> | {tag} <b>{contract}</b>\n\n"
                 f"진입가 <code>{slot['entry_price']:.4f}</code> | 레버리지 {slot['leverage']}배\n\n"
                 f"🎯 <b>목표가 및 본전방어</b>\n"
                 f"• TP1 <code>{slot['tp1']:.4f}</code> (+{abs(slot['change']):.2f}%) ➔ 도달 시스탑 +0.2 ATR 락\n"
@@ -155,13 +174,13 @@ def run_bot():
             )
             send_telegram_message(msg)
 
-        # 4. 전체 슬롯 현황판 출력
+        # 4. 슬롯 현황판 출력
         if active_slots:
             long_cnt = sum(1 for s in active_slots.values() if s["direction"] == "LONG")
             short_cnt = sum(1 for s in active_slots.values() if s["direction"] == "SHORT")
 
             slot_msg_lines = [
-                f"📊 <b>슬롯 현황 ({len(active_slots)} / {MAX_SLOTS})</b> | 🟢 롱 {long_cnt} / 🔴 숏 {short_cnt}\n"
+                f"📊 <b>BTCC 슬롯 현황 ({len(active_slots)} / {MAX_SLOTS})</b> | 🟢 롱 {long_cnt} / 🔴 숏 {short_cnt}\n"
             ]
 
             num_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
