@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BTCC USDT 선물 롱/숏 시그널 봇 (BTCC 공식 API 직접 연동 및 실시간 PnL 버전)
+BTCC USDT 선물 롱/숏 시그널 봇 (실시간 가격 기준 TP/SL 도달 감지 및 슬롯 고정 버전)
 """
 
 import os
@@ -21,7 +21,7 @@ def load_state():
     if not os.path.exists(STATE_FILE):
         return {
             "active_slots": {},
-            "stats": {"wins": 0, "draws": 0, "losses": 1, "pf": 0.00, "avg_r": -1.03, "last_r": -1.0}
+            "stats": {"wins": 0, "draws": 0, "losses": 0, "pf": 0.00, "avg_r": 0.0, "last_r": 0.0}
         }
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
@@ -32,7 +32,7 @@ def load_state():
     except Exception:
         return {
             "active_slots": {},
-            "stats": {"wins": 0, "draws": 0, "losses": 1, "pf": 0.00, "avg_r": -1.03, "last_r": -1.0}
+            "stats": {"wins": 0, "draws": 0, "losses": 0, "pf": 0.00, "avg_r": 0.0, "last_r": 0.0}
         }
 
 def save_state(state):
@@ -60,10 +60,9 @@ def send_telegram_message(message):
 def run_bot():
     state = load_state()
     active_slots = state.get("active_slots", {})
-    stats = state.get("stats", {"wins": 0, "draws": 0, "losses": 1, "pf": 0.00, "avg_r": -1.03, "last_r": -1.0})
+    stats = state.get("stats", {"wins": 0, "draws": 0, "losses": 0, "pf": 0.00, "avg_r": 0.0, "last_r": 0.0})
 
     try:
-        # 💡 BTCC 퍼블릭 선물 시세 API 엔드포인트 연동
         url = "https://a.btcc.com/api/v1/market/tickers"
         headers = {"User-Agent": "Mozilla/5.0"}
         res = requests.get(url, headers=headers, timeout=10)
@@ -72,21 +71,20 @@ def run_bot():
             return
         
         data = res.json()
-        # BTCC API 응답 구조에 맞게 티커 리스트 파싱 (보통 data 내부에 리스트가 위치함)
         tickers = data.get("data", data) if isinstance(data, dict) else data
         if not isinstance(tickers, list):
             tickers = []
 
         ticker_map = {}
         for t in tickers:
-            # BTCC 심볼 필드명 대응 (symbol 또는 contract 등)
             sym = t.get("symbol", t.get("contract", ""))
             if sym:
                 ticker_map[sym] = t
 
         newly_added = []
+        slots_to_remove = []
 
-        # 1. 기존 등록된 슬롯들의 현재가를 BTCC 기준 실시간 PnL로 업데이트
+        # 1. 기존 슬롯들의 현재가 실시간 비교 및 TP/SL 도달 감지
         for contract, slot in list(active_slots.items()):
             if contract in ticker_map:
                 t_info = ticker_map[contract]
@@ -101,7 +99,56 @@ def run_bot():
 
                 slot["pnl_pct"] = pnl_pct
 
-        # 2. 슬롯이 5개 미만일 때만 BTCC 종목 중 새로운 시그널 탐색
+                # TP / SL 도달 조건 판정
+                tp1 = slot["tp1"]
+                tp2 = slot["tp2"]
+                tp3 = slot["tp3"]
+                sl = slot["sl"]
+
+                hit_target = None
+                if direction == "LONG":
+                    if current_price >= tp3:
+                        hit_target = "TP3 (최종 익절 도달 🚀)"
+                    elif current_price >= tp2:
+                        hit_target = "TP2 (2차 익절 도달 🎯)"
+                    elif current_price >= tp1:
+                        hit_target = "TP1 (1차 익절 도달 ✨)"
+                    elif current_price <= sl:
+                        hit_target = "SL (손절 도달 🛑)"
+                else:  # SHORT
+                    if current_price <= tp3:
+                        hit_target = "TP3 (최종 익절 도달 🚀)"
+                    elif current_price <= tp2:
+                        hit_target = "TP2 (2차 익절 도달 🎯)"
+                    elif current_price <= tp1:
+                        hit_target = "TP1 (1차 익절 도달 ✨)"
+                    elif current_price >= sl:
+                        hit_target = "SL (손절 도달 🛑)"
+
+                if hit_target:
+                    tag = "🟢" if direction == "LONG" else "🔴"
+                    alert_msg = (
+                        f"🎯 <b>목표/손절 도달 알림</b> | {tag} <b>{contract}</b>\n\n"
+                        f"• 상태: <b>{hit_target}</b>\n"
+                        f"• 진입가: <code>{entry_price:.4f}</code>\n"
+                        f"• 현재가: <code>{current_price:.4f}</code>\n"
+                        f"• 최종 수익률: <b>{pnl_pct:+.2f}%</b>"
+                    )
+                    send_telegram_message(alert_msg)
+
+                    if "TP" in hit_target:
+                        stats["wins"] += 1
+                        stats["last_r"] = +2.0
+                    else:
+                        stats["losses"] += 1
+                        stats["last_r"] = -1.0
+
+                    slots_to_remove.append(contract)
+
+        for contract in slots_to_remove:
+            del active_slots[contract]
+
+        # 2. 빈 슬롯이 있을 때만 새로운 종목 탐색
         if len(active_slots) < MAX_SLOTS:
             for sym, t in ticker_map.items():
                 if len(active_slots) >= MAX_SLOTS:
@@ -114,9 +161,7 @@ def run_bot():
                     continue
                 
                 last_price = float(t.get("last", t.get("price", 0)))
-                # 24시간 변동률 필드명 대응
                 change = float(t.get("change_percentage", t.get("changePercent", 0)))
-                volume = float(t.get("volume_24h_quote", t.get("volume", 1_000_000)))
 
                 if last_price <= 0:
                     continue
@@ -156,7 +201,7 @@ def run_bot():
                 active_slots[contract] = slot_data
                 newly_added.append((contract, slot_data))
 
-        # 3. 새로운 종목 신규 시그널 알림 전송
+        # 3. 신규 시그널 알림 전송
         for contract, slot in newly_added:
             tag = "🟢" if slot["direction"] == "LONG" else "🔴"
             msg = (
@@ -201,13 +246,13 @@ def run_bot():
                 )
                 slot_msg_lines.append(line)
 
-            total_trades = stats["wins"] + stats["draws"] + stats["losses"]
-            win_rate = (stats["wins"] / (stats["wins"] + stats["losses"]) * 100) if (stats["wins"] + stats["losses"]) > 0 else 0.0
+            total_trades = stats["wins"] + stats["losses"]
+            win_rate = (stats["wins"] / total_trades * 100) if total_trades > 0 else 0.0
 
             stats_lines = (
                 f"\n📈 <b>[누적 통계]</b>\n"
-                f"{total_trades}전 {stats['wins']}승 {stats['draws']}무 {stats['losses']}패\n"
-                f"승률 {win_rate:.1f}% ({stats['wins']}승 {stats['losses']}패 / 무승부 제외)\n"
+                f"{total_trades}전 {stats['wins']}승 0무 {stats['losses']}패\n"
+                f"승률 {win_rate:.1f}% ({stats['wins']}승 {stats['losses']}패)\n"
                 f"평균 R {stats['avg_r']:.2f} | PF {stats['pf']:.2f} | 최근 1전 {stats['last_r']:+.1f}R"
             )
 
@@ -215,6 +260,7 @@ def run_bot():
             send_telegram_message(final_msg)
 
         state["active_slots"] = active_slots
+        state["stats"] = stats
         save_state(state)
 
     except Exception as e:
