@@ -21,7 +21,7 @@ TELEGRAM_CHAT_ID = os.getenv("BTCC_TELEGRAM_CHAT_ID")
 STATE_FILE = "btcc_state.json"
 TRADES_FILE = "trades.csv"
 
-# 💡 BTCC 공식 API 베이스 URL
+# BTCC 공식 API 베이스 URL
 BASE_URL = "https://trade.btcc.com"
 
 MAX_SLOTS = 5                  # 최대 슬롯 5개
@@ -234,12 +234,24 @@ def append_trade_csv(row):
         writer.writerow(clean_row)
 
 
-# ──────────────────────────── BTCC API 연동 ────────────────────────────
+# ──────────────────────────── BTCC API 연동 (브라우저 세션 우회 장착) ────────────────────────────
 def api_get(path, params=None):
+    session = requests.Session()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": "https://www.btcc.com/",
+        "Origin": "https://www.btcc.com"
+    }
     try:
-        response = requests.get(f"{BASE_URL}{path}", params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        response = session.get(f"{BASE_URL}{path}", params=params, headers=headers, timeout=10)
         if response.status_code == 200:
-            return response.json()
+            try:
+                return response.json()
+            except json.JSONDecodeError:
+                print(f"API non-JSON response {path}: {response.text[:200]}")
+                return None
         print(f"API error {response.status_code} {path}: {response.text[:200]}")
     except Exception as e:
         print(f"API request failed {path}: {e}")
