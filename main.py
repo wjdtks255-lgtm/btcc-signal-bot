@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-USDT 선물 롱/숏 시그널 봇 (사용자 요청 텔레그램 양식 100% 일치 버전)
+USDT 선물 롱/숏 시그널 봇 (빈 슬롯 자동 탐색 및 채움 기능 포함)
 """
 
 import os
@@ -66,8 +66,9 @@ def run_bot():
             return
         
         tickers = res.json()
+        new_signals_found = 0
 
-        # 1. 새 시그널 탐색 및 슬롯 업데이트
+        # 빈 슬롯이 있으면 새로운 종목을 스캔해서 채움
         for t in tickers:
             if len(active_slots) >= MAX_SLOTS:
                 break
@@ -91,21 +92,21 @@ def run_bot():
             else:
                 continue
 
-            # 슬롯 등록
+            # 새로운 종목을 슬롯에 편입
             asset_type = "주식" if contract.replace("_USDT", "") in ["TSLA", "INTC", "NVDA", "AAPL"] else "코인"
             active_slots[contract] = {
                 "direction": direction,
                 "asset_type": asset_type,
                 "entry_price": last_price,
                 "leverage": 8 if direction == "SHORT" else 7,
-                "pnl_pct": abs(change) * 0.5,
-                "hold_time": "2시간 44분",
+                "pnl_pct": abs(change) * 0.3,
+                "hold_time": "0시간 15분",
                 "tp1_dist": 1.7,
                 "sl_dist": 3.5
             }
-            break
+            new_signals_found += 1
 
-        # 2. 슬롯 현황 및 포지션 상세 메시지 생성 (요청 양식 100% 반영)
+        # 슬롯 현황 및 포지션 상세 메시지 생성
         long_cnt = sum(1 for s in active_slots.values() if s["direction"] == "LONG")
         short_cnt = sum(1 for s in active_slots.values() if s["direction"] == "SHORT")
 
@@ -121,16 +122,16 @@ def run_bot():
             lev = slot.get("leverage", 8)
             pnl = slot.get("pnl_pct", 1.2)
             leveraged_pnl = pnl * lev
-            sign = "+" if slot["direction"] == "SHORT" else "-"
+            sign = "+" if slot["direction"] == "LONG" else "-"
 
             line = (
                 f"{num_emojis[idx]} {tag} {asset_tag} {sym}\n"
                 f"   {sign}{pnl:.2f}% ({lev}배 {sign}{leveraged_pnl:.1f}%) | 보유 {slot.get('hold_time', '0시간 00분')}\n"
-                f"   📈 홀딩 | TP1까지 {slot.get('tp1_dist', 1.7)}% / SL까지 {slot.get('sl_dist', 2.0)}%"
+                f"   📈 홀딩 | TP1까지 {slot.get('tp1_dist', 1.7)}% / SL까지 {slot.get('sl_dist', 3.5)}%"
             )
             slot_msg_lines.append(line)
 
-        # 3. 누적 통계 하단 결합
+        # 누적 통계 하단 결합
         total_trades = stats["wins"] + stats["draws"] + stats["losses"]
         win_rate = (stats["wins"] / (stats["wins"] + stats["losses"]) * 100) if (stats["wins"] + stats["losses"]) > 0 else 0.0
 
