@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-USDT 선물 롱/숏 시그널 봇 (안정적인 퍼블릭 API 연동 및 TP/SL 도달/슬롯 관리 완벽 버전)
+USDT 선물 롱/숏 시그널 봇 (Git 자동 동기화 및 슬롯 영구 고정 버전)
 """
 
 import os
 import json
+import subprocess
 import requests
 from datetime import datetime, timezone
 
@@ -35,11 +36,20 @@ def load_state():
             "stats": {"wins": 0, "draws": 0, "losses": 0, "pf": 0.00, "avg_r": 0.0, "last_r": 0.0}
         }
 
-def save_state(state):
-    tmp = STATE_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+def save_and_commit_state(state):
+    # 로컬 JSON 저장
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, STATE_FILE)
+    
+    # 깃허브 액션 환경에서 상태 파일을 레포지토리에 자동 푸시하여 유실 방지
+    try:
+        subprocess.run(["git", "config", "--global", "user.name", "github-actions[bot]"], check=False)
+        subprocess.run(["git", "config", "--global", "user.email", "github-actions[bot]@users.noreply.github.com"], check=False)
+        subprocess.run(["git", "add", STATE_FILE], check=False)
+        subprocess.run(["git", "commit", "-m", "Auto-update bot state [skip ci]"], check=False)
+        subprocess.run(["git", "push"], check=False)
+    except Exception as e:
+        print(f"Git commit/push error: {e}")
 
 def send_telegram_message(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -63,7 +73,6 @@ def run_bot():
     stats = state.get("stats", {"wins": 0, "draws": 0, "losses": 0, "pf": 0.00, "avg_r": 0.0, "last_r": 0.0})
 
     try:
-        # 💡 깃허브 클라우드 환경에서 차단이나 DNS 에러 없이 안정적으로 작동하는 퍼블릭 시세 API 연동
         url = "https://api.gateio.ws/api/v4/futures/usdt/tickers"
         res = requests.get(url, timeout=10)
         
@@ -79,7 +88,7 @@ def run_bot():
 
         slots_to_remove = []
 
-        # 1. 기존 슬롯들의 현재가 실시간 갱신 및 TP/SL 도달 여부 검사
+        # 1. 기존 슬롯 현재가 갱신 및 TP/SL 도달 검사
         for contract, slot in list(active_slots.items()):
             if contract in ticker_map:
                 t_info = ticker_map[contract]
@@ -87,7 +96,6 @@ def run_bot():
                 entry_price = slot["entry_price"]
                 direction = slot["direction"]
 
-                # 실시간 PnL 계산
                 if direction == "LONG":
                     pnl_pct = ((current_price - entry_price) / entry_price) * 100
                 else:
@@ -95,7 +103,6 @@ def run_bot():
 
                 slot["pnl_pct"] = pnl_pct
 
-                # TP / SL 도달 조건 판정
                 tp1 = slot["tp1"]
                 tp2 = slot["tp2"]
                 tp3 = slot["tp3"]
@@ -111,7 +118,7 @@ def run_bot():
                         hit_target = "TP1 (1차 익절 도달 ✨)"
                     elif current_price <= sl:
                         hit_target = "SL (손절 도달 🛑)"
-                else:  # SHORT
+                else:
                     if current_price <= tp3:
                         hit_target = "TP3 (최종 익절 도달 🚀)"
                     elif current_price <= tp2:
@@ -121,7 +128,6 @@ def run_bot():
                     elif current_price >= sl:
                         hit_target = "SL (손절 도달 🛑)"
 
-                # 도달한 경우 알림 발송 및 통계 반영, 슬롯 제거 대상 등록
                 if hit_target:
                     tag = "🟢" if direction == "LONG" else "🔴"
                     alert_msg = (
@@ -142,11 +148,10 @@ def run_bot():
 
                     slots_to_remove.append(contract)
 
-        # 도달한 종목들을 슬롯에서 비워냄
         for contract in slots_to_remove:
             del active_slots[contract]
 
-        # 2. 도달로 인해 비워진 슬롯만큼 새로운 종목 탐색하여 채우기
+        # 2. 비워진 슬롯만큼 신규 종목 채우기
         newly_added = []
         if len(active_slots) < MAX_SLOTS:
             for contract, t in ticker_map.items():
@@ -200,7 +205,7 @@ def run_bot():
                 active_slots[contract] = slot_data
                 newly_added.append((contract, slot_data))
 
-        # 3. 새로 채워진 종목에 대한 상세 신규 시그널 알림 전송
+        # 3. 신규 시그널 알림 전송
         for contract, slot in newly_added:
             tag = "🟢" if slot["direction"] == "LONG" else "🔴"
             msg = (
@@ -218,7 +223,7 @@ def run_bot():
             )
             send_telegram_message(msg)
 
-        # 4. 갱신된 전체 슬롯 현황 및 통계 출력
+        # 4. 전체 슬롯 현황판 전송
         if active_slots:
             long_cnt = sum(1 for s in active_slots.values() if s["direction"] == "LONG")
             short_cnt = sum(1 for s in active_slots.values() if s["direction"] == "SHORT")
@@ -260,7 +265,7 @@ def run_bot():
 
         state["active_slots"] = active_slots
         state["stats"] = stats
-        save_state(state)
+        save_and_commit_state(state)
 
     except Exception as e:
         print(f"Error: {e}")
