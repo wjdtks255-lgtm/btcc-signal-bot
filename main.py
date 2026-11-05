@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 BTCC USDT 선물 롱/숏 시그널 봇 (텔레그램 알림 전용, 자동 주문 없음)
-- 종목명 링크 적용 버전
+- 제공해주신 최신 봇의 알림 양식, 타이밍, 링크 및 로직을 BTCC API 환경으로 완벽 이식
 """
 
 import csv
@@ -26,19 +26,19 @@ BASE_URL = "https://a.btcc.com/api/v1/market"
 
 MAX_SLOTS = 5                  # 최대 슬롯 5개
 
-# 진입 조건 
-MIN_CHANGE_PCT = 2.5          # 24시간 변동률 기준(%)
-MIN_QUOTE_VOLUME = 300_000    # 24시간 거래대금 최소값(USDT)
+# 진입 조건 (완화 버전 기준 반영)
+MIN_CHANGE_PCT = 2.0          # 24시간 변동률 기준(%)
+MIN_QUOTE_VOLUME = 200_000    # 24시간 거래대금 최소값(USDT)
 RSI_PERIOD = 14
 ATR_PERIOD = 14
 ADX_PERIOD = 14
-BODY_RATIO_MIN = 0.25         # 캔들 몸통 비율
+BODY_RATIO_MIN = 0.20         # 캔들 몸통 비율 조건
 LEVERAGED_TOKEN_RE = re.compile(r"\d+[LS]_USDT$")  # 레버리지 토큰 제외
 
 # 목표가/손절가 (ATR 배수)
 ATR_SL = 1.5
 ATR_TP_MULTS = (1.0, 2.5, 4.0)   
-MAX_SL_PCT = 6.0              
+MAX_SL_PCT = 7.0              
 MAX_PER_THEME = 1             
 
 # 비용/리스크 가정 및 수익형 본전 방어 오프셋
@@ -51,12 +51,12 @@ MAX_MARGIN_LOSS = 0.5
 ROTATE_HOURS = 18             
 ROTATE_MIN_PROFIT_PCT = 0.5   
 TIME_STOP_HOURS = 24          
-COOLDOWN_HOURS = 4            
+COOLDOWN_HOURS = 2            # 쿨다운 2시간
 
 # 결과 분류: 무승부 밴드
 DRAW_BAND_R = 0.05
 
-MAX_CANDIDATES = 50           
+MAX_CANDIDATES = 60           
 SCAN_BUDGET_SEC = 150
 
 FAIL_ALERT_THRESHOLD = 3      
@@ -118,7 +118,9 @@ def dir_tag(direction):
 
 
 def chart_link(symbol):
-    return f"https://www.btcc.com"
+    # BTCC 전용 차트 링크 형식 대응
+    clean_sym = symbol.replace("_", "").replace("USDT", "")
+    return f"https://www.btcc.com/ko-KR/trade/perpetual/{clean_sym}USDT"
 
 
 def pct_move(direction, entry, price):
@@ -287,7 +289,7 @@ def fetch_completed_5m(symbol, from_ts, now_ts):
     return fetch_completed_candles(symbol, "5m", from_ts, now_ts)
 
 
-# ──────────────────────────── 지표 및 고도화 필터 ────────────────────────────
+# ──────────────────────────── 지표 및 필터 ────────────────────────────
 def wilder_rsi(closes, period=RSI_PERIOD):
     if len(closes) < period + 1:
         return None
@@ -382,36 +384,35 @@ def check_order_block_retest(candles, direction, current_price):
         c = candles[i]
         if direction == "LONG":
             if c["o"] > c["c"]:  # 음봉 (Demand OB)
-                zone_low, zone_high = c["l"], c["o"]
-                if zone_low * 0.97 <= current_price <= zone_high * 1.04:
-                    return zone_low, zone_high
+                zone_low, zone_high = c["l"] * 0.98, c["o"] * 1.02
+                if zone_low <= current_price <= zone_high * 1.05:
+                    return c["l"], c["o"]
         else:
             if c["c"] > c["o"]:  # 양봉 (Supply OB)
-                zone_low, zone_high = c["o"], c["h"]
-                if zone_low * 0.96 <= current_price <= zone_high * 1.03:
-                    return zone_low, zone_high
+                zone_low, zone_high = c["o"] * 0.98, c["h"] * 1.02
+                if zone_low * 0.95 <= current_price <= zone_high:
+                    return c["o"], c["h"]
                     
     return last["l"], last["h"]
 
 
 def analyze_signal(symbol, direction, now_ts, current_price):
-    raw = api_get("/candlesticks", {"symbol": symbol, "interval": "1h", "limit": 80})
+    raw = api_get("/candlesticks", {"symbol": symbol, "interval": "1h", "limit": 60})
     if isinstance(raw, dict):
         raw = raw.get("data", raw.get("list", []))
     candles = [c for c in parse_candles(raw) if c["t"] + 3600 <= now_ts]
-    if len(candles) < 50:
+    if len(candles) < 30:
         return None
 
     closes = [c["c"] for c in candles]
     
-    ma50 = calc_ma(closes, 50)
-    ema20 = calc_ema(closes, 20)
-    ema50 = calc_ema(closes, 50)
+    ma50 = calc_ma(closes, min(50, len(closes)))
+    ema20 = calc_ema(closes, min(20, len(closes)))
     adx = calc_adx(candles, ADX_PERIOD)
     atr = calc_atr(candles, ATR_PERIOD)
     rsi = wilder_rsi(closes, RSI_PERIOD)
     
-    if not ma50 or not ema20 or not ema50 or not atr or atr <= 0 or rsi is None:
+    if not atr or atr <= 0 or rsi is None:
         return None
 
     last = candles[-1]
@@ -422,44 +423,6 @@ def analyze_signal(symbol, direction, now_ts, current_price):
     if body_ratio < BODY_RATIO_MIN:
         return None
 
-    ema_distance = abs(current_price - ema20)
-
-    if direction == "LONG":
-        if not (ema20 > ema50 and current_price > ma50):
-            return None
-        if adx < 14:
-            return None
-        if ema_distance > (1.5 * atr):
-            return None
-        if rsi < 45 or last["c"] <= last["o"] or body_ratio < BODY_RATIO_MIN:
-            return None
-    else:
-        if not (ema20 < ema50 and current_price < ma50):
-            return None
-        if adx < 14:
-            return None
-        if ema_distance > (1.5 * atr):
-            return None
-        if rsi > 55 or last["c"] >= last["o"] or body_ratio < BODY_RATIO_MIN:
-            return None
-
-    volumes = [c["v"] for c in candles]
-    if len(volumes) >= 20:
-        avg_vol = sum(volumes[-21:-1]) / 20
-        if avg_vol > 0 and last["v"] < avg_vol * 1.1:
-            return None
-
-    candles_4h = fetch_completed_candles(symbol, "4h", now_ts - (60 * 14400), now_ts)
-    if len(candles_4h) >= 30:
-        closes_4h = [c["c"] for c in candles_4h]
-        ema20_4h = calc_ema(closes_4h, 20)
-        ema50_4h = calc_ema(closes_4h, 50)
-        if ema20_4h and ema50_4h:
-            if direction == "LONG" and ema20_4h <= ema50_4h:
-                return None
-            if direction == "SHORT" and ema20_4h >= ema50_4h:
-                return None
-
     zone_low, zone_high = check_order_block_retest(candles, direction, current_price)
     if not zone_low or not zone_high:
         return None
@@ -468,7 +431,7 @@ def analyze_signal(symbol, direction, now_ts, current_price):
         "rsi": rsi, 
         "atr": atr, 
         "adx": adx,
-        "ema20": ema20,
+        "ema20": ema20 if ema20 else current_price,
         "body_ratio": body_ratio, 
         "ob_low": zone_low, 
         "ob_high": zone_high
@@ -880,7 +843,7 @@ def identify_new_signals(state, raw_tickers, now, start_time):
                     if elapsed < COOLDOWN_HOURS * 3600:
                         continue
                 else:
-                    if c_info.get("reason") == "SL" and elapsed < 1800:
+                    if c_info.get("reason") == "SL" and elapsed < 900:
                         continue
 
             volume = float(t.get("volume_24h_quote") or t.get("volume", 0))
@@ -944,6 +907,7 @@ def identify_new_signals(state, raw_tickers, now, start_time):
             def pct_of(price):
                 return pct_move(direction, last_price, price)
 
+            # 신규 시그널 개별 텔레그램 알림 전송 (종목명 링크 포함)
             msg = (
                 f"🛡️ <b>신규 시그널</b> | {dir_tag(direction)}\n"
                 f"<a href='{chart_link(symbol)}'>[{category}] {symbol}</a>\n\n"
@@ -1056,6 +1020,7 @@ def run_bot():
     if len(state["active_slots"]) < MAX_SLOTS:
         changed_new = identify_new_signals(state, raw_tickers, now, start_time)
 
+    # 💡 이벤트(포지션 상태 변화 또는 신규 시그널 발생)가 있을 때만 슬롯 현황 전송 타이밍 유지
     if changed_positions or changed_new:
         send_telegram_message(build_slot_status_message(state, tickers))
 
