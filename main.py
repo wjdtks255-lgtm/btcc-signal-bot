@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-USDT 선물 롱/숏 시그널 봇 (문법 에러 완전 해결 및 슬롯 고정 버전)
+USDT 선물 롱/숏 시그널 봇 (슬롯 꽉 찼을 때 신규 유입 완전 차단 및 실시간 PnL 버전)
 """
 
 import os
@@ -25,7 +25,10 @@ def load_state():
         }
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            if "active_slots" not in data:
+                data["active_slots"] = {}
+            return data
     except Exception:
         return {
             "active_slots": {},
@@ -66,9 +69,24 @@ def run_bot():
             return
         
         tickers = res.json()
+        ticker_map = {t.get("contract"): t for t in tickers}
         newly_added = []
 
-        # 슬롯이 꽉 차지 않았을 때만 새로운 종목 탐색
+        # 1. 기존에 등록된 슬롯들의 실시간 PnL만 현재가 기준으로 업데이트 (종목은 절대 안 바뀜)
+        for contract, slot in list(active_slots.items()):
+            if contract in ticker_map:
+                current_price = float(ticker_map[contract].get("last", slot["entry_price"]))
+                entry_price = slot["entry_price"]
+                direction = slot["direction"]
+
+                if direction == "LONG":
+                    pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                else:
+                    pnl_pct = ((entry_price - current_price) / entry_price) * 100
+
+                slot["pnl_pct"] = pnl_pct
+
+        # 2. 💡 핵심 방어선: 슬롯이 5개 미만일 때만 새로운 종목 탐색 수행 (5개 꽉 차면 이 블록은 아예 실행 안 됨)
         if len(active_slots) < MAX_SLOTS:
             for t in tickers:
                 if len(active_slots) >= MAX_SLOTS:
@@ -107,7 +125,7 @@ def run_bot():
                     "asset_type": asset_type,
                     "entry_price": last_price,
                     "leverage": 8 if direction == "SHORT" else 7,
-                    "pnl_pct": abs(change) * 0.3,
+                    "pnl_pct": 0.00,
                     "hold_time": "0시간 00분",
                     "tp1_dist": 1.7,
                     "sl_dist": 3.5,
@@ -119,7 +137,7 @@ def run_bot():
                 active_slots[contract] = slot_data
                 newly_added.append((contract, slot_data))
 
-        # 신규 종목 알림 발송
+        # 3. 진짜로 빈 슬롯이 채워졌을 때만 신규 시그널 알림 발송
         for contract, slot in newly_added:
             tag = "🟢" if slot["direction"] == "LONG" else "🔴"
             msg = (
@@ -137,7 +155,7 @@ def run_bot():
             )
             send_telegram_message(msg)
 
-        # 전체 슬롯 현황판 전송
+        # 4. 전체 슬롯 현황판 출력
         if active_slots:
             long_cnt = sum(1 for s in active_slots.values() if s["direction"] == "LONG")
             short_cnt = sum(1 for s in active_slots.values() if s["direction"] == "SHORT")
@@ -153,9 +171,9 @@ def run_bot():
                 tag = "🟢" if slot["direction"] == "LONG" else "🔴"
                 asset_tag = f"[{slot.get('asset_type', '코인')}]"
                 lev = slot.get("leverage", 8)
-                pnl = slot.get("pnl_pct", 1.2)
+                pnl = slot.get("pnl_pct", 0.0)
                 leveraged_pnl = pnl * lev
-                sign = "+" if slot["direction"] == "LONG" else "-"
+                sign = "+" if pnl >= 0 else ""
 
                 line = (
                     f"{num_emojis[idx]} {tag} {asset_tag} {sym}\n"
