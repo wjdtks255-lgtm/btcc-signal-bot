@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-USDT 선물 롱/숏 시그널 봇 (슬롯 꽉 찼을 때 신규 알림 발송 원천 차단 버전)
+USDT 선물 롱/숏 시그널 봇 (문법 에러 완전 해결 및 슬롯 고정 버전)
 """
 
 import os
@@ -68,7 +68,7 @@ def run_bot():
         tickers = res.json()
         newly_added = []
 
-        # 💡 핵심 수정: 슬롯이 이미 꽉 차있다면(5개 이상) 새로운 종목 탐색 자체를 하지 않음!
+        # 슬롯이 꽉 차지 않았을 때만 새로운 종목 탐색
         if len(active_slots) < MAX_SLOTS:
             for t in tickers:
                 if len(active_slots) >= MAX_SLOTS:
@@ -93,7 +93,6 @@ def run_bot():
                 else:
                     continue
 
-                # 빈 슬롯을 채울 새로운 종목 확정
                 asset_type = "주식" if contract.replace("_USDT", "") in ["TSLA", "INTC", "NVDA", "AAPL"] else "코인"
                 atr = last_price * 0.015
                 tp1 = last_price + (atr * 1.0 if direction == "LONG" else -atr * 1.0)
@@ -120,7 +119,7 @@ def run_bot():
                 active_slots[contract] = slot_data
                 newly_added.append((contract, slot_data))
 
-        # 2. 실제로 빈 슬롯이 있어서 새로 들어온 종목이 있을 때만 개별 [신규 시그널] 상세 알림 전송
+        # 신규 종목 알림 발송
         for contract, slot in newly_added:
             tag = "🟢" if slot["direction"] == "LONG" else "🔴"
             msg = (
@@ -138,7 +137,7 @@ def run_bot():
             )
             send_telegram_message(msg)
 
-        # 3. 기존 슬롯이 변경되었거나 새로 추가된 경우에만 전체 슬롯 현황 출력 (원하시면 주기적으로 현황판을 보게 할 수도 있지만, 깔끔하게 유지)
+        # 전체 슬롯 현황판 전송
         if active_slots:
             long_cnt = sum(1 for s in active_slots.values() if s["direction"] == "LONG")
             short_cnt = sum(1 for s in active_slots.values() if s["direction"] == "SHORT")
@@ -147,4 +146,42 @@ def run_bot():
                 f"📊 <b>슬롯 현황 ({len(active_slots)} / {MAX_SLOTS})</b> | 🟢 롱 {long_cnt} / 🔴 숏 {short_cnt}\n"
             ]
 
-            num_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣
+            num_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+            for idx, (sym, slot) in enumerate(active_slots.items()):
+                if idx >= 5: 
+                    break
+                tag = "🟢" if slot["direction"] == "LONG" else "🔴"
+                asset_tag = f"[{slot.get('asset_type', '코인')}]"
+                lev = slot.get("leverage", 8)
+                pnl = slot.get("pnl_pct", 1.2)
+                leveraged_pnl = pnl * lev
+                sign = "+" if slot["direction"] == "LONG" else "-"
+
+                line = (
+                    f"{num_emojis[idx]} {tag} {asset_tag} {sym}\n"
+                    f"   {sign}{pnl:.2f}% ({lev}배 {sign}{leveraged_pnl:.1f}%) | 보유 {slot.get('hold_time', '0시간 00분')}\n"
+                    f"   📈 홀딩 | TP1까지 {slot.get('tp1_dist', 1.7)}% / SL까지 {slot.get('sl_dist', 3.5)}%"
+                )
+                slot_msg_lines.append(line)
+
+            total_trades = stats["wins"] + stats["draws"] + stats["losses"]
+            win_rate = (stats["wins"] / (stats["wins"] + stats["losses"]) * 100) if (stats["wins"] + stats["losses"]) > 0 else 0.0
+
+            stats_lines = (
+                f"\n📈 <b>[누적 통계]</b>\n"
+                f"{total_trades}전 {stats['wins']}승 {stats['draws']}무 {stats['losses']}패\n"
+                f"승률 {win_rate:.1f}% ({stats['wins']}승 {stats['losses']}패 / 무승부 제외)\n"
+                f"평균 R {stats['avg_r']:.2f} | PF {stats['pf']:.2f} | 최근 1전 {stats['last_r']:+.1f}R"
+            )
+
+            final_msg = "\n".join(slot_msg_lines) + "\n" + stats_lines
+            send_telegram_message(final_msg)
+
+        state["active_slots"] = active_slots
+        save_state(state)
+
+    except Exception as e:
+        print(f"Error: {e}")
+
+if __name__ == "__main__":
+    run_bot()
